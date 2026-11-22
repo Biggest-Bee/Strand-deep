@@ -165,7 +165,12 @@ fn resolve_call(
             // Same-module function (non-method defs only - bare names
             // inside a class body don't see methods).
             if let Some(infos) = f.funcs.get(name) {
-                if let Some(info) = infos.iter().find(|i| !i.is_method) {
+                if let Some(info) = infos
+                    .iter()
+                    .rev()
+                    .find(|i| !i.is_method && !i.is_stub)
+                    .or_else(|| infos.iter().rev().find(|i| !i.is_method))
+                {
                     stats.resolved_local += 1;
                     return caller
                         .map(|c| vec![(c, (f.module.clone(), info.qualname.clone()))])

@@ -1,0 +1,101 @@
+# Python taint/null/leak model - defaults for strand-deep.
+
+[[sources]]
+kind = "env"
+names = ["os.environ", "os.getenv", "os.getenvb"]
+
+[[sources]]
+kind = "argv"
+names = ["sys.argv", "sys.stdin"]
+
+[[sources]]
+kind = "stdin"
+names = ["input"]
+
+[[sources]]
+kind = "file"
+names = ["open", "io.open", "pathlib.Path.read_text", "pathlib.Path.read_bytes", "codecs.open"]
+
+[[sources]]
+kind = "net"
+names = ["requests.get", "requests.post", "urllib.request.urlopen", "httpx.get", "httpx.post"]
+
+[[sanitizers]]
+names = ["int", "float", "bool", "len", "str.isdigit", "html.escape", "markupsafe.escape", "shlex.quote", "urllib.parse.quote"]
+
+[[sinks]]
+name = "eval"
+class = "code_exec"
+arg = 0
+
+[[sinks]]
+name = "exec"
+class = "code_exec"
+arg = 0
+
+[[sinks]]
+name = "compile"
+class = "code_exec"
+arg = 0
+
+[[sinks]]
+name = "os.system"
+class = "shell"
+
+[[sinks]]
+name = "os.popen"
+class = "shell"
+
+[[sinks]]
+name = "subprocess.call"
+class = "shell"
+
+[[sinks]]
+name = "subprocess.run"
+class = "shell"
+
+[[sinks]]
+name = "subprocess.Popen"
+class = "shell"
+
+[[sinks]]
+name = "subprocess.check_call"
+class = "shell"
+
+[[sinks]]
+name = "subprocess.check_output"
+class = "shell"
+
+[[sinks]]
+name = "commands.getoutput"
+class = "shell"
+
+[[sinks]]
+name = "commands.getstatusoutput"
+class = "shell"
+
+[[sinks]]
+name = "pickle.loads"
+class = "deser"
+
+[[sinks]]
+name = "pickle.load"
+class = "deser"
+
+[[sinks]]
+name = "marshal.loads"
+class = "deser"
+
+[[sinks]]
+name = "yaml.load"
+class = "deser"
+
+[[sinks]]
+name = "execute"
+class = "sql"
+
+[[sinks]]
+name = "executemany"
+class = "sql"
+
+propagators = []

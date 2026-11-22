@@ -56,6 +56,8 @@ pub(crate) struct FuncInfo {
     pub end: usize,
     pub qualname: String,
     pub is_method: bool,
+    /// Body is `...`/`pass`/docstring-only (overload stubs).
+    pub is_stub: bool,
 }
 
 /// A dynamic-import site whose specifier is `prefix + param + suffix`
@@ -437,12 +439,21 @@ fn collect_facts(
                             anc = a.parent();
                         }
                         qual_parts.reverse();
+                        let is_stub = node
+                            .child_by_field_name("body")
+                            .map(|b| {
+                                let t = b.utf8_text(text.as_bytes()).unwrap_or("");
+                                let t = t.trim();
+                                t == "..." || t == "pass" || t.is_empty()
+                            })
+                            .unwrap_or(false);
                         let entry = FuncInfo {
                             params,
                             start: node.start_byte(),
                             end: node.end_byte(),
                             qualname: qual_parts.join("."),
                             is_method,
+                            is_stub,
                         };
                         funcs
                             .entry(name.to_string())
@@ -492,7 +503,13 @@ fn enclosing_func<'t>(
             return f
                 .funcs
                 .get(&name)
-                .and_then(|v| v.first().cloned())
+                .and_then(|v| {
+                    v.iter()
+                        .rev()
+                        .find(|i| !i.is_stub)
+                        .or_else(|| v.last())
+                        .cloned()
+                })
                 .map(|info| (name, info));
         }
         anc = n.parent();
@@ -781,7 +798,7 @@ pub fn analyze_parsed(parsed: &[PyFile], file_set: &BTreeSet<String>) -> IpaOutp
         let Some(func_params) = site_file
             .funcs
             .get(&site.func)
-            .and_then(|v| v.first())
+            .and_then(|v| v.iter().rev().find(|i| !i.is_stub).or_else(|| v.last()))
             .map(|i| &i.params)
         else {
             unresolved.push(format!("{}:{} (no signature)", site.file_rel, site.func));

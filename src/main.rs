@@ -4,7 +4,10 @@
 //! call-site arguments across function and module boundaries.
 
 mod callgraph;
+mod facts;
 mod ipa;
+mod models;
+mod solver;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,6 +34,14 @@ struct Cli {
     /// Dump resolved call edges as `module.func -> module.func`.
     #[arg(long)]
     dump_callgraph: bool,
+
+    /// Run taint/null/leak analysis and print findings.
+    #[arg(long)]
+    analyze: bool,
+
+    /// Model directory (default: embedded python.toml).
+    #[arg(long)]
+    models: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -85,6 +96,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cli.dump_callgraph {
         for ((cm, cf), (tm, tf)) in &cg.edges {
             println!("{cm}.{cf} -> {tm}.{tf}");
+        }
+    }
+
+    // Bug-class analysis (taint/null/leak) via summary solver.
+    if cli.analyze {
+        let model = match &cli.models {
+            Some(dir) => {
+                let models = models::load_dir(dir)?;
+                models.get("python").cloned().unwrap_or_else(|| {
+                    models::python_default().expect("embedded model")
+                })
+            }
+            None => models::python_default().expect("embedded model"),
+        };
+        let t1 = std::time::Instant::now();
+        let sol = solver::solve(&parsed, &model);
+        eprintln!(
+            "solve: {} functions, {} SCCs ({} cyclic), {} fixpoint iters, {} findings ({:?})",
+            sol.stats.functions,
+            sol.stats.sccs,
+            sol.stats.cyclic_sccs,
+            sol.stats.fixpoint_iters,
+            sol.stats.findings,
+            t1.elapsed()
+        );
+        // Blind-spot report: what the analysis could NOT see.
+        let unknown_funcs = sol
+            .summaries
+            .values()
+            .filter(|s| s.touches_unknown)
+            .count();
+        eprintln!(
+            "blind spots: {} functions touched unresolvable calls;              {} param-flow sinks pending instantiation",
+            unknown_funcs,
+            sol.summaries
+                .values()
+                .map(|s| s.param_sinks.values().map(|v| v.len()).sum::<usize>())
+                .sum::<usize>()
+        );
+        for f in &sol.findings {
+            println!(
+                "[{:?}] {}:{} {} - {} (via {}) [{:.0}%]",
+                f.class,
+                f.file,
+                f.line,
+                f.sink,
+                f.source,
+                f.via.join(" -> "),
+                f.confidence * 100.0
+            );
         }
     }
 
