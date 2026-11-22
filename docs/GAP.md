@@ -34,9 +34,35 @@ Strand's incremental graph = the "seconds, offline, explainable" cell
 nobody occupies. Precision/honesty (blind-spot report) is the trust
 mechanism against FP fatigue.
 
-## Open decisions (need owner input)
+## Decisions (owner, 2026-11-21)
 
-- Bug class for v1: taint (env/argv -> sinks) vs null/None vs resource leak
-- Language for v1: Python (matches existing strand-deep code + weakest
-  incumbent coverage) vs Rust/JS
-- Corpus: which 10 real repos
+- Bug classes: ALL, in order - taint -> null/None -> resource leaks.
+  Engine must be bug-class-agnostic; sources/sinks/sanitizers are
+  declarative (TOML models), not hardcoded.
+- Languages: ALL - Python, Rust, JS/TS. First proving slice is
+  taint-on-Python (existing code + weakest incumbent coverage), then
+  expand in order.
+- Corpus: picked by agent (below).
+
+## Test corpus (10 repos)
+
+Python (4):
+- psf/requests - HTTP lib, clean structure, moderate size
+- pallets/flask - web framework, request->response flows
+- encode/httpx - modern HTTP client, async + sync paths
+- pallets/click - CLI framework, argv taint sources everywhere
+
+Rust (3):
+- sharkdp/bat - CLI tool, good size, real-world
+- clap-rs/clap - argument parser, heavy macro + derive patterns
+- rayon-rs/rayon - parallel iterators, closure-heavy call graphs
+
+JS/TS (3):
+- axios/axios - HTTP client, promise chains, interceptors
+- expressjs/express - web framework, middleware = natural taint flows
+- preactjs/preact - VDOM lib, hooks/closures stress call resolution
+
+Rationale: all free to clone/analyze, no build required for our
+frontend, varied sizes (10k-100k LOC), cover CLI/web/lib shapes and
+stress different call-resolution patterns (callbacks, decorators,
+macros, promises).
