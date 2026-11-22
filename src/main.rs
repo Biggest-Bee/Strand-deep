@@ -49,7 +49,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = cli.root.canonicalize()?;
 
     // Phase 0: Strand's static scan - nodes, static edges, warnings.
-    let scan = scan_project(&root, &[Lang::Python])?;
+    let scan = scan_project(
+        &root,
+        &[Lang::Python, Lang::Js, Lang::Rust],
+    )?;
     eprintln!(
         "scan: {} nodes, {} edges, {} warnings",
         scan.nodes.len(),
