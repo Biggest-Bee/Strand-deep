@@ -724,9 +724,12 @@ fn walk_stmt(node: Node, ctx: &mut Ctx, env: &mut HashMap<String, VarState>) {
                 if let (Some(t), Some(it), Some(b)) = (target, iter, body) {
                     let iv = eval_expr(it, ctx, env);
                     if let Some(tn) = expr_key(t, ctx, env) {
+                        // Iterated elements are not the iterable's
+                        // return value: a maybe-None iterable crashes
+                        // before the body runs, and elements don't
+                        // inherit the collection's resource.
                         let mut st = VarState::default();
                         st.taint = iv.state.taint.clone();
-                        st.is_none = iv.state.is_none;
                         env.insert(tn, st);
                     }
                     walk_branch(b, ctx, env);
@@ -1269,6 +1272,13 @@ fn eval_expr(node: Node, ctx: &mut Ctx, env: &mut HashMap<String, VarState>) -> 
                 }
                 let mut st = lv.state;
                 st.join(&rv.state);
+                // `A or B`: if A is None it is falsy, so the result is
+                // B - nullness comes from the right side only.
+                // `A and B`: A being None short-circuits to A, so
+                // either side can produce None.
+                if optext.trim() == "or" {
+                    st.is_none = rv.state.is_none;
+                }
                 return ExprVal { state: st, source_label: None };
             }
             // Fallback: join all operand states.
