@@ -52,6 +52,8 @@ pub struct SinkRule {
     #[serde(default)]
     pub arg: Option<usize>,
     /// Arg index whose taint matters for null-deref sinks.
+    /// Reserved for future sink kinds; unused in v1.
+    #[allow(dead_code)]
     #[serde(default)]
     pub deref_arg: Option<usize>,
 }

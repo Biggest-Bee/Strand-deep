@@ -101,11 +101,6 @@ impl VarState {
             self.resource = other.resource.clone();
         }
     }
-    fn merge_labels(&mut self, other: &VarState) {
-        // For sequential (non-branch) combination: union taint
-        // possibilities by keeping existing or taking other's.
-        self.join(other);
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -122,7 +117,6 @@ pub struct Ctx<'a> {
     rbind: RBindings,
     model: &'a Model,
     summaries: &'a HashMap<(String, String), Summary>,
-    params: &'a [String],
     qualname: &'a str,
     acquired: Vec<(String, String, u32)>,
     released: HashSet<String>,
@@ -132,6 +126,7 @@ pub struct Ctx<'a> {
     ret: VarState,
     saw_return: bool,
     nodes_left: usize,
+    budget_hit: bool,
     pub findings: Vec<Finding>,
     pub param_sinks: BTreeMap<usize, Vec<PendingSink>>,
     pub touches_unknown: bool,
@@ -149,6 +144,10 @@ pub struct FuncAnalysis {
     /// Final environment - used for `<module>` nodes to seed
     /// function scopes with module globals.
     pub env: HashMap<String, VarState>,
+    /// True when the per-function node budget was exhausted;
+    /// results are partial and callers should treat the summary
+    /// as a lower bound.
+    pub budget_hit: bool,
 }
 
 /// Analyze a function body. `func_node` = function_definition or
@@ -167,7 +166,6 @@ pub fn analyze_function(
         rbind: resolve_bindings(f),
         model,
         summaries,
-        params,
         qualname,
         acquired: Vec::new(),
         released: HashSet::new(),
@@ -175,6 +173,7 @@ pub fn analyze_function(
         ret: VarState::default(),
         saw_return: false,
         nodes_left: NODE_BUDGET,
+        budget_hit: false,
         findings: Vec::new(),
         param_sinks: BTreeMap::new(),
         touches_unknown: false,
@@ -236,7 +235,11 @@ pub fn analyze_function(
             summary.param_to_return.insert(idx);
         }
     }
-    FuncAnalysis { summary, env }
+    FuncAnalysis {
+        summary,
+        env,
+        budget_hit: ctx.budget_hit,
+    }
 }
 
 fn first_unclosed(ctx: &Ctx) -> Option<String> {
@@ -363,6 +366,7 @@ fn line_of(node: Node) -> u32 {
 
 fn budget(ctx: &mut Ctx) -> bool {
     if ctx.nodes_left == 0 {
+        ctx.budget_hit = true;
         return true;
     }
     ctx.nodes_left -= 1;
@@ -874,7 +878,7 @@ fn handle_with_item(
     let vv = eval_expr(val, ctx, env);
     if let Some(a) = alias {
         if let Some(key) = expr_key(a, ctx, env) {
-            let mut st = vv.state.clone();
+            let st = vv.state.clone();
             // with-managed resources are released at block end -
             // keep resource flag during body, release after.
             if st.resource.is_some() {
@@ -1545,6 +1549,22 @@ fn eval_call(node: Node, ctx: &mut Ctx, env: &mut HashMap<String, VarState>) -> 
         }
     }
 
+    // Model propagators: resolved callees whose summary does not
+    // propagate taint can still be declared arg->return flows
+    // (e.g. serializers, str()). Unresolved callees already
+    // propagate conservatively via unknown_call_result.
+    if result.state.taint.is_none()
+        && ctx
+            .model
+            .propagators
+            .iter()
+            .any(|p| dotted == *p || dotted.ends_with(&format!(".{p}")))
+    {
+        if let Some(av) = args.iter().find(|a| a.state.taint.is_some()) {
+            result.state.taint = av.state.taint.clone();
+        }
+    }
+
     // Sanitizer cleans result taint.
     if is_sanitizer {
         result.state.taint = None;
@@ -1704,7 +1724,7 @@ fn enclosing_class(node: Node, f: &PyFile) -> Option<String> {
 /// return taint, none-ness, unclosed resources, and re-emitted
 /// findings for tainted params reaching callee sinks.
 fn apply_summary(
-    node: Node,
+    _node: Node,
     ctx: &mut Ctx,
     env: &mut HashMap<String, VarState>,
     args: &[ExprVal],
@@ -1714,7 +1734,7 @@ fn apply_summary(
     let _ = env;
     let caller_qual = format!("{}.{}", ctx.f.module, ctx.qualname);
     let mut result_taint: Option<String> = None;
-    let mut result_none = false;
+    let result_none = sum.may_return_none;
     let result_resource = sum.returns_unclosed.clone();
 
     for (i, av) in args.iter().enumerate() {
@@ -1764,8 +1784,6 @@ fn apply_summary(
     if sum.returns_tainted && result_taint.is_none() {
         result_taint = Some(format!("ret:{callee_label}"));
     }
-    result_none = sum.may_return_none;
-
     ctx.pending_result = Some(ExprVal {
         state: VarState {
             taint: result_taint,
@@ -1774,13 +1792,6 @@ fn apply_summary(
         },
         source_label: None,
     });
-}
-
-fn extend_via(through: &[String], callee: &str, ctx: &Ctx) -> Vec<String> {
-    let mut v: Vec<String> = through.to_vec();
-    v.push(format!("{}.{}", ctx.f.module, ctx.qualname));
-    v.push(callee.to_string());
-    v
 }
 
 /// Unresolvable/unknown callee: taint propagates arg->result

@@ -9,7 +9,7 @@
 //! Everything else is counted in [`CallStats`] by reason - this is
 //! the measurement instrument for spike #1 (call resolution rate).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use rayon::prelude::*;
 use tree_sitter::Node;
@@ -85,7 +85,7 @@ fn is_builtin(name: &str) -> bool {
         "False"|"None"|"NotImplemented"|"Ellipsis"|"ArithmeticError"|
         "AssertionError"|"LookupError"|"NameError"|"UnboundLocalError"|
         "ZeroDivisionError"|"OverflowError"|"MemoryError"|"RecursionError"|
-        "Warning"|"UserWarning"|"DeprecationWarning"|"bytes"|"bytearray"
+        "Warning"|"UserWarning"|"DeprecationWarning"
     )
 }
 

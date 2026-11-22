@@ -8,7 +8,7 @@
 //! state, findings stay conservative).
 
 use rayon::prelude::*;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use tree_sitter::Node;
 
@@ -345,6 +345,9 @@ pub fn solve(parsed: &[PyFile], model: &Model) -> SolveOutput {
                     &summaries,
                     globals,
                 );
+                if analysis.budget_hit {
+                    stats.budget_exceeded += 1;
+                }
                 // Collect findings every pass (dedup later).
                 for finding in &analysis.summary.findings {
                     let key = (

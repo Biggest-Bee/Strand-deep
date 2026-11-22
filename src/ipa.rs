@@ -895,6 +895,7 @@ pub fn analyze_parsed(parsed: &[PyFile], file_set: &BTreeSet<String>) -> IpaOutp
 }
 
 /// Convenience wrapper: parse + analyze.
+#[allow(dead_code)] // used by unit tests
 pub fn analyze(files: &BTreeMap<String, String>) -> IpaOutput {
     let file_set: BTreeSet<String> = files.keys().cloned().collect();
     let parsed = parse_all(files);
