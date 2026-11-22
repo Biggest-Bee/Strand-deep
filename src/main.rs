@@ -3,6 +3,7 @@
 //! resolves `import_module(param)`-style sites by propagating literal
 //! call-site arguments across function and module boundaries.
 
+mod callgraph;
 mod ipa;
 
 use std::collections::BTreeMap;
@@ -26,6 +27,10 @@ struct Cli {
     /// Only run IPA; skip writing the graph.
     #[arg(long)]
     ipa_only: bool,
+
+    /// Dump resolved call edges as `module.func -> module.func`.
+    #[arg(long)]
+    dump_callgraph: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  warn: {w}");
     }
 
-    // Collect .py file texts for the IPA layer.
+    // Collect .py file texts.
     let mut files: BTreeMap<String, String> = BTreeMap::new();
     for node in &scan.nodes {
         if node.ends_with(".py") {
@@ -55,9 +60,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Phase 1: interprocedural resolution.
+    // Parse once; both IPA and the call graph share the trees.
     let t0 = std::time::Instant::now();
-    let out = ipa::analyze(&files);
+    let parsed = ipa::parse_all(&files);
+    let file_set: std::collections::BTreeSet<String> =
+        files.keys().cloned().collect();
+
+    // Call graph + resolution stats (spike #1 instrumentation).
+    let cg = callgraph::build(&parsed);
+    eprintln!(
+        "callgraph: {} edges, {} calls - {:.1}% resolved          (import {} local {} method {}; unknown: name {} object {} method {} complex {}; builtin {})",
+        cg.edges.len(),
+        cg.stats.total,
+        cg.stats.resolution_rate() * 100.0,
+        cg.stats.resolved_import,
+        cg.stats.resolved_local,
+        cg.stats.resolved_method,
+        cg.stats.unknown_name,
+        cg.stats.unknown_object,
+        cg.stats.unknown_method,
+        cg.stats.complex_callee,
+        cg.stats.builtin,
+    );
+    if cli.dump_callgraph {
+        for ((cm, cf), (tm, tf)) in &cg.edges {
+            println!("{cm}.{cf} -> {tm}.{tf}");
+        }
+    }
+
+    // Phase 1: interprocedural resolution.
+    let out = ipa::analyze_parsed(&parsed, &file_set);
     eprintln!(
         "ipa: {} edges inferred, {} sites resolved, {} unresolved ({:?})",
         out.edges.len(),

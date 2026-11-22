@@ -27,23 +27,35 @@ const MAX_CALL_SITES: usize = 64;
 const MAX_STRINGS: usize = 64;
 
 /// One Python file's parsed view.
-struct PyFile {
+pub(crate) struct PyFile {
     /// Project-root-relative path, `/`-separated, `.py` suffix.
-    rel: String,
+    pub(crate) rel: String,
     /// Dotted module name (`pkg.loader`; `__init__` stripped).
-    module: String,
-    tree: Tree,
-    text: String,
+    pub(crate) module: String,
+    pub(crate) tree: Tree,
+    pub(crate) text: String,
     /// Local name -> (module key, member). `member=None` means the
     /// local name refers to the module itself (`import m [as x]`).
     /// `member=Some(f)` means `from m import f [as x]` - `f` may be a
     /// function OR a submodule (resolved by usage context).
     /// Module keys may start with `.` for relative imports.
-    bindings: HashMap<String, (String, Option<String>)>,
+    pub(crate) bindings: HashMap<String, (String, Option<String>)>,
     /// Module-level `NAME = "literal"` constants.
-    consts: HashMap<String, String>,
-    /// `def` name -> ordered parameter names.
-    funcs: HashMap<String, Vec<String>>,
+    pub(crate) consts: HashMap<String, String>,
+    /// `def` short name -> info (Vec: same-name defs are rare but
+    /// legal; first entry wins for lookups).
+    pub(crate) funcs: HashMap<String, Vec<FuncInfo>>,
+}
+
+/// Facts about one `def`: params, byte range, qualified name
+/// (`Class.method` for methods), and whether it's a method.
+#[derive(Clone)]
+pub(crate) struct FuncInfo {
+    pub params: Vec<String>,
+    pub start: usize,
+    pub end: usize,
+    pub qualname: String,
+    pub is_method: bool,
 }
 
 /// A dynamic-import site whose specifier is `prefix + param + suffix`
@@ -245,7 +257,7 @@ fn specifier_template(
     Some((pname.clone(), prefix, suffix))
 }
 
-fn analyze_file(rel: &str, text: &str) -> Option<PyFile> {
+pub(crate) fn analyze_file(rel: &str, text: &str) -> Option<PyFile> {
     let tree = parse_ts(text)?;
     let mut f = PyFile {
         rel: rel.to_string(),
@@ -272,7 +284,7 @@ fn collect_facts(
     text: &str,
     bindings: &mut HashMap<String, (String, Option<String>)>,
     consts: &mut HashMap<String, String>,
-    funcs: &mut HashMap<String, Vec<String>>,
+    funcs: &mut HashMap<String, Vec<FuncInfo>>,
 ) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
@@ -393,7 +405,49 @@ fn collect_facts(
                                 }
                             }
                         }
-                        funcs.insert(name.to_string(), params);
+                        // Qualified name + method flag from ancestors.
+                        let mut qual_parts = vec![name.to_string()];
+                        let mut is_method = false;
+                        let mut anc = node.parent();
+                        while let Some(a) = anc {
+                            match a.kind() {
+                                "class_definition" => {
+                                    is_method = true;
+                                    if let Some(cn) = a
+                                        .child_by_field_name("name")
+                                        .and_then(|n| {
+                                            n.utf8_text(text.as_bytes()).ok()
+                                        })
+                                    {
+                                        qual_parts.push(cn.to_string());
+                                    }
+                                }
+                                "function_definition" => {
+                                    if let Some(fn_) = a
+                                        .child_by_field_name("name")
+                                        .and_then(|n| {
+                                            n.utf8_text(text.as_bytes()).ok()
+                                        })
+                                    {
+                                        qual_parts.push(fn_.to_string());
+                                    }
+                                }
+                                _ => {}
+                            }
+                            anc = a.parent();
+                        }
+                        qual_parts.reverse();
+                        let entry = FuncInfo {
+                            params,
+                            start: node.start_byte(),
+                            end: node.end_byte(),
+                            qualname: qual_parts.join("."),
+                            is_method,
+                        };
+                        funcs
+                            .entry(name.to_string())
+                            .or_default()
+                            .push(entry);
                     }
                 }
             }
@@ -423,8 +477,11 @@ fn first_arg(call: Node) -> Option<Node> {
     found
 }
 
-/// Enclosing `def` of a node -> (name, ordered params).
-fn enclosing_func<'t>(node: Node<'t>, f: &PyFile) -> Option<(String, Vec<String>)> {
+/// Enclosing `def` of a node -> (name, info).
+fn enclosing_func<'t>(
+    node: Node<'t>,
+    f: &PyFile,
+) -> Option<(String, FuncInfo)> {
     let mut anc = node.parent();
     while let Some(n) = anc {
         if n.kind() == "function_definition" {
@@ -432,7 +489,11 @@ fn enclosing_func<'t>(node: Node<'t>, f: &PyFile) -> Option<(String, Vec<String>
                 .child_by_field_name("name")
                 .and_then(|x| x.utf8_text(f.text.as_bytes()).ok())?
                 .to_string();
-            return f.funcs.get(&name).map(|p| (name, p.clone()));
+            return f
+                .funcs
+                .get(&name)
+                .and_then(|v| v.first().cloned())
+                .map(|info| (name, info));
         }
         anc = n.parent();
     }
@@ -447,9 +508,10 @@ fn dyn_sites(f: &PyFile) -> Vec<DynSite> {
         if node.kind() == "call" && is_dyn_import_call(node, &f.text) {
             if let Some(arg) = first_arg(node) {
                 if arg.kind() != "string" {
-                    if let Some((func, params)) = enclosing_func(node, f) {
-                        if let Some((param, prefix, suffix)) =
-                            specifier_template(arg, &f.text, f, &params)
+                    if let Some((func, info)) = enclosing_func(node, f) {
+                        if let Some((param, prefix, suffix)) = specifier_template(
+                            arg, &f.text, f, &info.params,
+                        )
                         {
                             out.push(DynSite {
                                 file_rel: f.rel.clone(),
@@ -473,7 +535,7 @@ fn dyn_sites(f: &PyFile) -> Vec<DynSite> {
 /// Resolve a possibly-relative module key against the importer's
 /// module. `from . import x` in `pkg.loader` -> base `pkg`;
 /// `from ..a import b` -> parent of pkg.
-fn resolve_module_key(key: &str, importer_module: &str) -> Option<String> {
+pub(crate) fn resolve_module_key(key: &str, importer_module: &str) -> Option<String> {
     if !key.starts_with('.') {
         return Some(key.to_string());
     }
@@ -497,9 +559,9 @@ fn resolve_module_key(key: &str, importer_module: &str) -> Option<String> {
 /// Resolved import bindings for one file: local name ->
 /// (absolutized module, member). Computed once per file so call
 /// resolution doesn't redo relative-import math per call site.
-type RBindings = HashMap<String, (String, Option<String>)>;
+pub(crate) type RBindings = HashMap<String, (String, Option<String>)>;
 
-fn resolve_bindings(f: &PyFile) -> RBindings {
+pub(crate) fn resolve_bindings(f: &PyFile) -> RBindings {
     f.bindings
         .iter()
         .filter_map(|(local, (mk, member))| {
@@ -512,7 +574,7 @@ fn resolve_bindings(f: &PyFile) -> RBindings {
 /// Module an attribute-call object expression refers to, if statically
 /// known. `m.f()` where m is `import m [as x]` / `from p import m`,
 /// and dotted chains `a.b.c.f()` from `import a.b.c`.
-fn object_module(obj: Node, rbind: &RBindings, text: &str) -> Option<String> {
+pub(crate) fn object_module(obj: Node, rbind: &RBindings, text: &str) -> Option<String> {
     match obj.kind() {
         "identifier" => {
             let name = obj.utf8_text(text.as_bytes()).ok()?;
@@ -643,19 +705,20 @@ fn callsite_param_arg<'t>(
 
 /// Main entry: analyze `files` (rel -> text) for cross-file dynamic
 /// import resolution. `file_set` is the set of known rel paths.
-pub fn analyze(files: &BTreeMap<String, String>) -> IpaOutput {
-    let file_set: BTreeSet<String> = files.keys().cloned().collect();
-
-    // Phase 1: parse every file in parallel. The Vec keeps input
-    // order (indexed par_iter), so output stays deterministic.
+/// Parse all files in parallel. Order matches `files` iteration.
+pub fn parse_all(files: &BTreeMap<String, String>) -> Vec<PyFile> {
     let file_vec: Vec<(&String, &String)> = files.iter().collect();
-    let parsed: Vec<PyFile> = file_vec
+    file_vec
         .par_iter()
         .map(|(rel, text)| analyze_file(rel, text))
         .collect::<Vec<_>>()
         .into_iter()
         .flatten()
-        .collect();
+        .collect()
+}
+
+/// Analyze pre-parsed files. `file_set` = known rel paths.
+pub fn analyze_parsed(parsed: &[PyFile], file_set: &BTreeSet<String>) -> IpaOutput {
 
     // Phase 2: find dynamic sites shaped lit* + param + lit*,
     // in parallel per file (order preserved).
@@ -715,7 +778,12 @@ pub fn analyze(files: &BTreeMap<String, String>) -> IpaOutput {
             .iter()
             .find(|f| f.rel == site.file_rel)
             .expect("site file was parsed");
-        let Some(func_params) = site_file.funcs.get(&site.func) else {
+        let Some(func_params) = site_file
+            .funcs
+            .get(&site.func)
+            .and_then(|v| v.first())
+            .map(|i| &i.params)
+        else {
             unresolved.push(format!("{}:{} (no signature)", site.file_rel, site.func));
             continue;
         };
@@ -807,6 +875,13 @@ pub fn analyze(files: &BTreeMap<String, String>) -> IpaOutput {
         unresolved,
         resolved,
     }
+}
+
+/// Convenience wrapper: parse + analyze.
+pub fn analyze(files: &BTreeMap<String, String>) -> IpaOutput {
+    let file_set: BTreeSet<String> = files.keys().cloned().collect();
+    let parsed = parse_all(files);
+    analyze_parsed(&parsed, &file_set)
 }
 
 #[cfg(test)]
