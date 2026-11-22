@@ -1,43 +1,63 @@
 # strand-deep
 
-Demand-driven interprocedural analysis for Python dynamic imports -
-a research companion to [Strand](https://github.com/Biggest-Bee/Strand).
+Offline interprocedural analysis for Python - a research companion
+to [Strand](https://github.com/Biggest-Bee/Strand).
 
 ## What it does
 
-Strand's scanner resolves `import_module("literal")` and same-file
-constants, but reports `import_module(name)` inside a function as an
-unresolved dynamic site. strand-deep goes one level deeper: it finds
-call sites of that function **across the whole project** - through
-`from m import f`, `import m`, aliases, and `m.f()` attribute calls -
-and propagates literal arguments backward through the import.
+Builds a function-level call graph, computes interprocedural
+summaries via SCC-ordered fixpoint, and reports findings for three
+bug classes:
 
-```
-loader.py:  def load(name): import_module("plugins." + name)
-app.py:     from loader import load
-            load("ldap")          # -> edge loader.py -> plugins/ldap.py
-```
+- **Taint** - untrusted sources (env vars, request data, CLI args)
+  flowing to dangerous sinks (shell exec, SQL, eval, ...)
+- **Null/None** - values that may be `None` reaching dereferences,
+  with guard-clause and narrowing awareness
+- **Resource leaks** - acquired resources (files, sockets, locks)
+  that may escape without release
 
-Every inferred edge is tagged `Heuristic` (lowest confidence) because
-the value chain crosses function boundaries. Sites that can't be
-resolved are reported, never guessed.
+It also resolves dynamic imports interprocedurally: `import_module`
+arguments propagated backward from literal call sites become
+`Heuristic`-confidence edges.
+
+Sources, sinks, sanitizers and propagators are data, not code -
+TOML model files per language (`models/python.toml` by default,
+`--models <dir>` to extend/override).
+
+Every finding carries a call path and confidence; calls that can't
+be resolved are counted in a blind-spot report, never guessed.
 
 ## Usage
 
 ```
-strand-deep <project-root> [-o out.strand] [--ipa-only]
+strand-deep <project-root> [-o out.strand]
+    [--ipa-only] [--analyze] [--models <dir>]
+    [--dump-callgraph]
 ```
 
-Runs Strand's static scan, layers IPA edges on top, writes a merged
-`.strand` graph. `--ipa-only` prints inferred edges as text.
+- default: Strand static scan (all languages) + IPA edges merged
+  into a `.strand` graph (or stdout summary)
+- `--analyze`: run taint/null/leak analysis, print findings +
+  blind-spot report
+- `--models <dir>`: directory of `*.toml` model files
+- `--dump-callgraph`: print resolved `module.func -> module.func`
+  edges
 
-## v0 scope / non-goals
+## Scope / non-goals
 
-- Single-parameter specifiers: `lit* + param + lit*` shapes only
-- Literal/const call-site arguments (no nested call returns yet)
-- No recursion beyond depth 1 (function -> its callers)
-- Caps: 64 call sites, 64 candidate strings; overflow -> unresolved
-- Python only; JS/Rust IPA is future work
+- IPA bug classes: taint, null/None, resource leaks (Python only;
+  JS/Rust IPA is future work)
+- Sources/sinks/sanitizers/propagators are TOML-modeled per
+  language (`models/python.toml`, `--models <dir>`)
+- Interprocedural via SCC-ordered summary fixpoint over the
+  function-level call graph; may-analysis with honest blind-spot
+  reporting (unresolved calls, budget exhaustion)
+- File-level dependency graph covers Python, JS/TS, Rust plus
+  manifests and lockfiles for major ecosystems (delegated to
+  `strand-import`)
+- Not a replacement for build-integrated analyzers (CodeQL,
+  Infer): no type information, so `obj.method()` calls on unknown
+  receivers stay unresolved by design
 
 ## Status
 
