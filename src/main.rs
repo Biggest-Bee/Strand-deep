@@ -150,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 f.confidence * 100.0
             );
         }
+        std::mem::forget(sol);
     }
 
     // Phase 1: interprocedural resolution.
@@ -170,7 +171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (s, d, k) in &out.edges {
             println!("{s} -> {d} [{k:?}]");
         }
-        return Ok(());
+        return deep_exit();
     }
 
     // Phase 2: emit merged .strand.
@@ -194,5 +195,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stats.n_nodes,
         stats.n_edges
     );
-    Ok(())
+    deep_exit()
+}
+
+/// Every Python file's syntax tree plus the full call graph stays
+/// live until here; dropping them costs >1s on large repos. All
+/// remaining values are plain memory with nothing open, so exit
+/// directly and let the OS reclaim it.
+fn deep_exit() -> Result<(), Box<dyn std::error::Error>> {
+    std::process::exit(0);
 }
