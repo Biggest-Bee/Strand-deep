@@ -408,13 +408,6 @@ mod tests {
         solve(&parsed, &model)
     }
 
-    fn classes(out: &SolveOutput) -> Vec<SinkKind> {
-        let mut v: Vec<SinkKind> = out.findings.iter().map(|f| f.class.clone()).collect();
-        v.sort();
-        v.dedup();
-        v
-    }
-
     #[test]
     fn taint_env_to_subprocess_cross_function() {
         let out = run(&[(

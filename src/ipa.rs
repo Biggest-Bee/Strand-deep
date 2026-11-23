@@ -320,8 +320,36 @@ fn collect_facts(
     consts: &mut HashMap<String, String>,
     funcs: &mut HashMap<String, Vec<FuncInfo>>,
 ) {
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
+    // Enumerate only the four matched kinds via a tree-sitter query
+    // (C-side matching) instead of a Rust DFS over every node. The
+    // old stack DFS visited children last-to-first, i.e. reverse
+    // preorder; for laminar byte ranges that is exactly "end_byte
+    // descending" (ancestors end after descendants, later siblings
+    // end after earlier ones), so sorting matches that way preserves
+    // the original processing order bit for bit.
+    static FACTS_QUERY: std::sync::OnceLock<tree_sitter::Query> = std::sync::OnceLock::new();
+    let query = FACTS_QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            &tree_sitter_python::LANGUAGE.into(),
+            "(import_statement) @n (import_from_statement) @n (assignment) @n (function_definition) @n",
+        )
+        .expect("python facts query")
+    });
+    let mut qcursor = tree_sitter::QueryCursor::new();
+    let mut matches = qcursor.matches(query, root, text.as_bytes());
+    use tree_sitter::StreamingIterator as _;
+    let mut nodes: Vec<Node> = Vec::new();
+    while let Some(m) = matches.next() {
+        for cap in m.captures() {
+            nodes.push(cap.node);
+        }
+    }
+    nodes.sort_by(|a, b| {
+        b.end_byte()
+            .cmp(&a.end_byte())
+            .then_with(|| b.start_byte().cmp(&a.start_byte()))
+    });
+    for node in nodes {
         match node.kind() {
             "import_statement" => {
                 // `import a.b.c` binds `a` -> module "a" (top package;
@@ -496,8 +524,6 @@ fn collect_facts(
             }
             _ => {}
         }
-        let mut c = node.walk();
-        stack.extend(node.children(&mut c));
     }
 }
 
@@ -551,10 +577,15 @@ fn enclosing_func<'t>(
 
 /// Find dynamic-import sites in `f` shaped `lit* + param + lit*`.
 fn dyn_sites(f: &PyFile) -> Vec<DynSite> {
+    // A dyn-import call's callee text is literally `__import__` or
+    // `*import_module`, so a file whose text contains neither cannot
+    // hold a site - skip enumerating its calls entirely.
+    if !f.text.contains("__import__") && !f.text.contains("import_module") {
+        return Vec::new();
+    }
     let mut out = Vec::new();
-    let mut stack = vec![f.tree.root_node()];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "call" && is_dyn_import_call(node, &f.text) {
+    for node in call_nodes(f) {
+        if is_dyn_import_call(node, &f.text) {
             if let Some(arg) = first_arg(node) {
                 if arg.kind() != "string" {
                     if let Some((func, info)) = enclosing_func(node, f) {
@@ -575,8 +606,6 @@ fn dyn_sites(f: &PyFile) -> Vec<DynSite> {
                 }
             }
         }
-        let mut c = node.walk();
-        stack.extend(node.children(&mut c));
     }
     out
 }
@@ -812,6 +841,19 @@ pub fn analyze_parsed(parsed: &[PyFile], file_set: &BTreeSet<String>) -> IpaOutp
             .par_iter()
             .enumerate()
             .map(|(fi, f)| {
+                // A call can only resolve to a needed function if that
+                // name literally appears in this file's text - as the
+                // call's identifier/attribute, or in the import
+                // statement an alias resolves through. Files lacking
+                // every needed name contribute nothing.
+                let file_needed: Vec<&str> = needed
+                    .iter()
+                    .copied()
+                    .filter(|n| f.text.contains(*n))
+                    .collect();
+                if file_needed.is_empty() {
+                    return Vec::new();
+                }
                 let rbind = resolve_bindings(f);
                 let mut out = Vec::new();
                 for node in call_nodes(f) {
@@ -826,14 +868,14 @@ pub fn analyze_parsed(parsed: &[PyFile], file_set: &BTreeSet<String>) -> IpaOutp
                             .ok()
                             .and_then(|n| rbind.get(n))
                             .and_then(|(_, mem)| mem.as_ref())
-                            .is_some_and(|mem| needed.contains(mem.as_str())),
+                            .is_some_and(|mem| file_needed.contains(&mem.as_str())),
                         // `obj.f(...)` - the attribute text is the func
                         // name; object_module resolution is deferred
                         // to call_targets only when the name matches.
                         "attribute" => func_node
                             .child_by_field_name("attribute")
                             .and_then(|a| a.utf8_text(f.text.as_bytes()).ok())
-                            .is_some_and(|a| needed.contains(a)),
+                            .is_some_and(|a| file_needed.contains(&a)),
                         _ => false,
                     };
                     if !keep {
