@@ -257,16 +257,11 @@ pub fn build(parsed: &[PyFile]) -> CallGraph {
             let rbind = resolve_bindings(f);
             let mut stats = CallStats::default();
             let mut edges = Vec::new();
-            let mut stack = vec![f.tree.root_node()];
-            while let Some(node) = stack.pop() {
-                if node.kind() == "call" {
-                    stats.total += 1;
-                    for (caller, callee) in resolve_call(node, f, &rbind, &methods, &mut stats) {
-                        edges.push((caller, callee));
-                    }
+            for node in crate::ipa::call_nodes(f) {
+                stats.total += 1;
+                for (caller, callee) in resolve_call(node, f, &rbind, &methods, &mut stats) {
+                    edges.push((caller, callee));
                 }
-                let mut c = node.walk();
-                stack.extend(node.children(&mut c));
             }
             (edges, stats)
         })

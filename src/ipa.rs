@@ -108,6 +108,31 @@ fn parse_ts(text: &str) -> Option<Tree> {
     p.parse(text, None)
 }
 
+/// All `call` nodes in a file, enumerated by a tree-sitter query in C
+/// rather than a full Rust-side tree walk. Order matches document
+/// order, same as the old stack walk produced for stats purposes
+/// (callgraph sorts/dedups edges anyway; IPA indexes by byte range).
+pub(crate) fn call_nodes<'a>(f: &'a PyFile) -> Vec<Node<'a>> {
+    use tree_sitter::StreamingIterator;
+    static QUERY: std::sync::OnceLock<tree_sitter::Query> = std::sync::OnceLock::new();
+    let query = QUERY.get_or_init(|| {
+        tree_sitter::Query::new(
+            &tree_sitter_python::LANGUAGE.into(),
+            "(call) @call",
+        )
+        .expect("python call query")
+    });
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut out = Vec::new();
+    let mut matches = cursor.matches(query, f.tree.root_node(), f.text.as_bytes());
+    while let Some(m) = matches.next() {
+        for cap in m.captures() {
+            out.push(cap.node);
+        }
+    }
+    out
+}
+
 /// String literal content of a node, or `None` for non-literals,
 /// f-strings, and strings containing format braces.
 fn string_literal(node: Node, text: &str) -> Option<String> {
@@ -261,11 +286,18 @@ fn specifier_template(
 
 pub(crate) fn analyze_file(rel: &str, text: &str) -> Option<PyFile> {
     let tree = parse_ts(text)?;
+    Some(analyze_file_tree(rel, text.to_string(), tree))
+}
+
+/// Build a `PyFile` from an already-parsed tree - used when the
+/// caller obtained trees from `strand_import::scan_project_with_py`
+/// so each file is parsed exactly once.
+pub(crate) fn analyze_file_tree(rel: &str, text: String, tree: Tree) -> PyFile {
     let mut f = PyFile {
         rel: rel.to_string(),
         module: module_of(rel),
         tree,
-        text: text.to_string(),
+        text,
         bindings: HashMap::new(),
         consts: HashMap::new(),
         funcs: HashMap::new(),
@@ -278,7 +310,7 @@ pub(crate) fn analyze_file(rel: &str, text: &str) -> Option<PyFile> {
     f.bindings = bindings;
     f.consts = consts;
     f.funcs = funcs;
-    Some(f)
+    f
 }
 
 fn collect_facts(
@@ -734,8 +766,23 @@ pub fn parse_all(files: &BTreeMap<String, String>) -> Vec<PyFile> {
         .collect()
 }
 
+/// Build `PyFile`s from trees strand-import already parsed, in
+/// parallel. Order follows the input vec.
+pub fn parse_all_sources(
+    sources: BTreeMap<String, strand_import::scan::PySource>,
+) -> Vec<PyFile> {
+    sources
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(rel, src)| analyze_file_tree(&rel, src.text, src.tree))
+        .collect()
+}
+
 /// Analyze pre-parsed files. `file_set` = known rel paths.
 pub fn analyze_parsed(parsed: &[PyFile], file_set: &BTreeSet<String>) -> IpaOutput {
+    let prof = std::env::var("STRAND_PROFILE").is_ok();
+    let t_all = std::time::Instant::now();
 
     // Phase 2: find dynamic sites shaped lit* + param + lit*,
     // in parallel per file (order preserved).
@@ -743,37 +790,67 @@ pub fn analyze_parsed(parsed: &[PyFile], file_set: &BTreeSet<String>) -> IpaOutp
         .par_iter()
         .flat_map_iter(dyn_sites)
         .collect();
+    if prof {
+        eprintln!("ipa dyn_sites: {:?} ({} sites)", t_all.elapsed(), sites.len());
+    }
 
     // Phase 3: build the call index once - every call node resolved
     // to its (module, func) targets, inverted for O(1) site lookup.
     // Each file contributes (target, call-range) pairs; merged in
     // file order so rec_ids ordering stays deterministic.
-    let per_file: Vec<Vec<((String, String), usize, usize)>> = parsed
-        .par_iter()
-        .enumerate()
-        .map(|(fi, f)| {
-            let rbind = resolve_bindings(f);
-            let mut out = Vec::new();
-            let mut stack = vec![f.tree.root_node()];
-            while let Some(node) = stack.pop() {
-                if node.kind() == "call" {
-                    if let Some(func_node) = node.child_by_field_name("function") {
-                        for target in call_targets(func_node, &rbind, &f.text) {
-                            out.push((
-                                target,
-                                node.start_byte(),
-                                node.end_byte(),
-                            ));
-                        }
+    // Only calls that can target a dyn-site function are recorded:
+    // `needed` holds the site function names, and a cheap name check
+    // runs before the full `call_targets` resolution. A call whose
+    // resolved func name is not in `needed` can never match a site
+    // key, so skipping it loses nothing.
+    let needed: std::collections::HashSet<&str> =
+        sites.iter().map(|s| s.func.as_str()).collect();
+    let per_file: Vec<Vec<((String, String), usize, usize)>> = if needed.is_empty() {
+        Vec::new()
+    } else {
+        parsed
+            .par_iter()
+            .enumerate()
+            .map(|(fi, f)| {
+                let rbind = resolve_bindings(f);
+                let mut out = Vec::new();
+                for node in call_nodes(f) {
+                    let Some(func_node) = node.child_by_field_name("function") else {
+                        continue;
+                    };
+                    let keep = match func_node.kind() {
+                        // `from m import f [as g]`; g(...) targets m.f -
+                        // the member name is what sites key on.
+                        "identifier" => func_node
+                            .utf8_text(f.text.as_bytes())
+                            .ok()
+                            .and_then(|n| rbind.get(n))
+                            .and_then(|(_, mem)| mem.as_ref())
+                            .is_some_and(|mem| needed.contains(mem.as_str())),
+                        // `obj.f(...)` - the attribute text is the func
+                        // name; object_module resolution is deferred
+                        // to call_targets only when the name matches.
+                        "attribute" => func_node
+                            .child_by_field_name("attribute")
+                            .and_then(|a| a.utf8_text(f.text.as_bytes()).ok())
+                            .is_some_and(|a| needed.contains(a)),
+                        _ => false,
+                    };
+                    if !keep {
+                        continue;
+                    }
+                    for target in call_targets(func_node, &rbind, &f.text) {
+                        out.push((target, node.start_byte(), node.end_byte()));
                     }
                 }
-                let mut c = node.walk();
-                stack.extend(node.children(&mut c));
-            }
-            let _ = fi;
-            out
-        })
-        .collect();
+                let _ = fi;
+                out
+            })
+            .collect()
+    };
+    if prof {
+        eprintln!("ipa call_index: {:?}", t_all.elapsed());
+    }
     let mut calls: Vec<CallRec> = Vec::new();
     let mut index: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for (fi, recs) in per_file.into_iter().enumerate() {
@@ -887,6 +964,9 @@ pub fn analyze_parsed(parsed: &[PyFile], file_set: &BTreeSet<String>) -> IpaOutp
         }
     }
 
+    if prof {
+        eprintln!("ipa sites_resolve: {:?}", t_all.elapsed());
+    }
     IpaOutput {
         edges,
         unresolved,

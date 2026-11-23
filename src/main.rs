@@ -9,12 +9,11 @@ mod ipa;
 mod models;
 mod solver;
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use strand_core::GraphBuilder;
-use strand_import::scan::{scan_project, Lang};
+use strand_import::scan::{scan_project_with_py, Lang};
 
 #[derive(Parser)]
 #[command(name = "strand-deep", version, about = "Interprocedural dynamic-import analysis")]
@@ -49,10 +48,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = cli.root.canonicalize()?;
 
     // Phase 0: Strand's static scan - nodes, static edges, warnings.
-    let scan = scan_project(
+    // `scan_project_with_py` also hands back each .py file's text and
+    // tree-sitter tree so the phases below reuse the parse.
+    let t_scan = std::time::Instant::now();
+    let (scan, py_src) = scan_project_with_py(
         &root,
         &[Lang::Python, Lang::Js, Lang::Rust],
     )?;
+    eprintln!("scan: {:.1?}", t_scan.elapsed());
     eprintln!(
         "scan: {} nodes, {} edges, {} warnings",
         scan.nodes.len(),
@@ -63,25 +66,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("  warn: {w}");
     }
 
-    // Collect .py file texts.
-    let mut files: BTreeMap<String, String> = BTreeMap::new();
-    for node in &scan.nodes {
-        if node.ends_with(".py") {
-            let p = root.join(node);
-            if let Ok(text) = std::fs::read_to_string(&p) {
-                files.insert(node.clone(), text);
-            }
-        }
-    }
-
-    // Parse once; both IPA and the call graph share the trees.
+    // Reuse the trees strand-import already built - no second parse.
+    let file_set: std::collections::BTreeSet<String> = scan
+        .nodes
+        .iter()
+        .filter(|n| n.ends_with(".py"))
+        .cloned()
+        .collect();
+    let n_py = py_src.len();
     let t0 = std::time::Instant::now();
-    let parsed = ipa::parse_all(&files);
-    let file_set: std::collections::BTreeSet<String> =
-        files.keys().cloned().collect();
+    let parsed = ipa::parse_all_sources(py_src);
+    eprintln!("parse_all: {:.1?} ({} files)", t0.elapsed(), n_py);
 
     // Call graph + resolution stats (spike #1 instrumentation).
+    let t_cg = std::time::Instant::now();
     let cg = callgraph::build(&parsed);
+    eprintln!("callgraph: {:.1?}", t_cg.elapsed());
     eprintln!(
         "callgraph: {} edges, {} calls - {:.1}% resolved          (import {} local {} method {}; unknown: name {} object {} method {} complex {}; builtin {})",
         cg.edges.len(),
@@ -153,13 +153,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Phase 1: interprocedural resolution.
+    let t_ipa = std::time::Instant::now();
     let out = ipa::analyze_parsed(&parsed, &file_set);
     eprintln!(
         "ipa: {} edges inferred, {} sites resolved, {} unresolved ({:?})",
         out.edges.len(),
         out.resolved,
         out.unresolved.len(),
-        t0.elapsed()
+        t_ipa.elapsed()
     );
     for u in out.unresolved.iter().take(20) {
         eprintln!("  unresolved: {u}");
