@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t_scan = std::time::Instant::now();
     let (scan, py_src) = scan_project_with_py(
         &root,
-        &[Lang::Python, Lang::Js, Lang::Rust],
+        &[Lang::Python, Lang::Js, Lang::Rust, Lang::Go],
     )?;
     eprintln!("scan: {:.1?}", t_scan.elapsed());
     eprintln!(
