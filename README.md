@@ -1,65 +1,46 @@
 # strand-deep
 
-Offline interprocedural analysis for Python - a research companion
-to [Strand](https://github.com/Biggest-Bee/Strand).
+> **Moved.** This repository is archived. The engine now lives in the
+> [Strand](https://github.com/Biggest-Bee/Strand) workspace as
+> [`crates/strand-deep`](https://github.com/Biggest-Bee/Strand/tree/main/crates/strand-deep)
+> and is published on crates.io as
+> [`strand-deep`](https://crates.io/crates/strand-deep).
+
+## Where it went
+
+- **CLI**: `cargo install strand-cli` (binary `strand`), then
+  `strand deep <dir> [--analyze] [--dump-callgraph] [--ipa-only]
+  [--models <dir>]` - the same pipeline this repo's binary provided,
+  now with JS/TS, Go, and Rust solvers in addition to Python.
+- **GUI**: `cargo install strand-gui` - the "Deep scan..." button
+  runs the same `analyze_project` pipeline on any directory.
+- **Library**: `strand_deep::analyze::analyze_project(root)` is the
+  one-call API (scan + parse + all language solvers + findings).
 
 ## What it does
 
-Builds a function-level call graph, computes interprocedural
-summaries via SCC-ordered fixpoint, and reports findings for three
-bug classes:
+Offline interprocedural analysis across Python, JS/TS, Go, and Rust:
 
-- **Taint** - untrusted sources (env vars, request data, CLI args)
-  flowing to dangerous sinks (shell exec, SQL, eval, ...)
-- **Null/None** - values that may be `None` reaching dereferences,
-  with guard-clause and narrowing awareness
-- **Resource leaks** - acquired resources (files, sockets, locks)
-  that may escape without release
+- **Taint** - untrusted sources (env vars, request data, CLI args,
+  `include_str!`, file reads) flowing to dangerous sinks (shell
+  exec, SQL, eval, ...) across function boundaries
+- **Null/None** - `None`/`null`/`nil`/`Option` values reaching
+  dereferences, unwraps, or uses, with guard-clause narrowing
+- **Resource leaks** - acquired resources escaping without release
+  (defer/RAII aware per language)
 
-It also resolves dynamic imports interprocedurally: `import_module`
-arguments propagated backward from literal call sites become
-`Heuristic`-confidence edges.
+Plus dynamic-import resolution: `import_module`/`require(expr)`/
+`import(expr)` arguments propagated from literal call sites become
+`Heuristic`-confidence graph edges.
 
 Sources, sinks, sanitizers and propagators are data, not code -
-TOML model files per language (`models/python.toml` by default,
-`--models <dir>` to extend/override).
+TOML model files per language (`python.toml`, `js.toml`, `go.toml`,
+`rust.toml`; `--models <dir>` to extend/override).
 
 Every finding carries a call path and confidence; calls that can't
 be resolved are counted in a blind-spot report, never guessed.
 
-## Usage
-
-```
-strand-deep <project-root> [-o out.strand]
-    [--ipa-only] [--analyze] [--models <dir>]
-    [--dump-callgraph]
-```
-
-- default: Strand static scan (all languages) + IPA edges merged
-  into a `.strand` graph (or stdout summary)
-- `--analyze`: run taint/null/leak analysis, print findings +
-  blind-spot report
-- `--models <dir>`: directory of `*.toml` model files
-- `--dump-callgraph`: print resolved `module.func -> module.func`
-  edges
-
-## Scope / non-goals
-
-- IPA bug classes: taint, null/None, resource leaks (Python only;
-  JS/Rust IPA is future work)
-- Sources/sinks/sanitizers/propagators are TOML-modeled per
-  language (`models/python.toml`, `--models <dir>`)
-- Interprocedural via SCC-ordered summary fixpoint over the
-  function-level call graph; may-analysis with honest blind-spot
-  reporting (unresolved calls, budget exhaustion)
-- File-level dependency graph covers Python, JS/TS, Rust plus
-  manifests and lockfiles for major ecosystems (delegated to
-  `strand-import`)
-- Not a replacement for build-integrated analyzers (CodeQL,
-  Infer): no type information, so `obj.method()` calls on unknown
-  receivers stay unresolved by design
-
 ## Status
 
-Research project. Not yet integrated into Strand - integration path
-is `EdgeList`-compatible `Heuristic` edges via `strand scan --import`.
+Frozen at the Python-only research stage. All further development
+happens in the Strand monorepo.
