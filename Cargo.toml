@@ -6,8 +6,8 @@ description = "Demand-driven interprocedural analysis for dynamic imports - rese
 license = "Apache-2.0"
 
 [dependencies]
-strand-core = { path = "../Strand/crates/strand-core" }
-strand-import = { path = "../Strand/crates/strand-import" }
+strand-core = { git = "https://github.com/Biggest-Bee/Strand" }
+strand-import = { git = "https://github.com/Biggest-Bee/Strand" }
 tree-sitter = "0.27.2"
 tree-sitter-python = "0.25.0"
 clap = { version = "4", features = ["derive"] }
